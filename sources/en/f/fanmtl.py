@@ -4,7 +4,6 @@ from typing import Generator
 from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup, Tag
 from lncrawl.models import Chapter
-# We inherit from the base Crawler to avoid abstract method errors from templates
 from lncrawl.core.crawler import Crawler
 
 logger = logging.getLogger(__name__)
@@ -14,8 +13,8 @@ class FanMTLCrawler(Crawler):
     base_url = "https://www.fanmtl.com/"
 
     def initialize(self):
-        # NUCLEAR SPEED: 60 threads just for fetching the TOC pages
-        self.init_executor(60)
+        # High concurrency for TOC fetching
+        self.init_executor(60) 
         self.cleaner.bad_css.update({'div[align="center"]'})
 
     def read_novel_info(self):
@@ -26,22 +25,24 @@ class FanMTLCrawler(Crawler):
         possible_title = soup.select_one(".novel-info h1.novel-title")
         self.novel_title = possible_title.text.strip() if possible_title else "Unknown Novel"
 
-        # 2. Cover (Exact match from your HTML Source 10)
-        # Structure: <div class="fixed-img"><figure class="cover"><img src="...">
-        img_tag = soup.select_one(".fixed-img img")
+        # 2. Cover
+        # Priority: <figure class="cover"> inside header
+        img_tag = soup.select_one("figure.cover img")
         if not img_tag:
-            img_tag = soup.select_one(".novel-cover img")
+             # Fallback: Try to find the image inside the fixed-img div
+             img_tag = soup.select_one(".fixed-img img")
             
         if img_tag:
-            self.novel_cover = self.absolute_url(img_tag.get("src") or img_tag.get("data-src"))
+            # Get src or data-src (lazy loading)
+            url = img_tag.get("src") or img_tag.get("data-src")
+            self.novel_cover = self.absolute_url(url)
+        
         logger.info("Cover URL found: %s", self.novel_cover)
 
-        # 3. Author (Exact match from your HTML Source 10)
-        # Structure: <div class="author"><span>Author:</span><span itemprop="author">NAME</span>
+        # 3. Author
         author_tag = soup.select_one('.novel-info .author span[itemprop="author"]')
         if author_tag:
             text = author_tag.text.strip()
-            # Basic filter to ensure we don't set the URL as the author name
             if "http" not in text and len(text) > 1:
                 self.novel_author = text
             else:
@@ -49,11 +50,10 @@ class FanMTLCrawler(Crawler):
         else:
             self.novel_author = "Unknown"
 
-        # 4. Summary (Exact match from your HTML Source 13)
-        # Structure: <div class="summary">...<div class="content">...<p>TEXT</p>
+        # 4. Summary
+        # Target the specific content div inside the summary section
         summary_div = soup.select_one(".summary .content")
         if summary_div:
-            # get_text("\n\n") preserves paragraph breaks for the intro page
             self.novel_synopsis = summary_div.get_text("\n\n").strip()
         else:
             self.novel_synopsis = "Summary not available."
@@ -62,14 +62,12 @@ class FanMTLCrawler(Crawler):
         self.volumes = [{"id": 1, "title": "Volume 1"}]
         self.chapters = []
         
-        # 6. Chapters (Robust Pagination Logic)
+        # 6. Chapters
         pagination = soup.select('.pagination a[data-ajax-update="#chpagedlist"]')
         
         if not pagination:
-            # Single page novel
             self.parse_chapter_list(soup)
         else:
-            # Multi-page novel
             last_page = pagination[-1]
             last_page_url = self.absolute_url(last_page["href"])
             common_page_url = last_page_url.split("?")[0]
@@ -88,10 +86,8 @@ class FanMTLCrawler(Crawler):
                     self.parse_chapter_list(page_soup)
             except Exception as e:
                 logger.error("Pagination error: %s", e)
-                # Fallback to just the first page if pagination fails
                 self.parse_chapter_list(soup)
 
-        # Ensure strict order by ID
         self.chapters.sort(key=lambda x: x["id"])
 
     def parse_chapter_list(self, soup):
@@ -110,4 +106,5 @@ class FanMTLCrawler(Crawler):
     def download_chapter_body(self, chapter):
         soup = self.get_soup(chapter["url"])
         body = soup.select_one("#chapter-article .chapter-content")
-        return self.cleaner.extract(body)
+        # FIX: Use extract_contents instead of extract
+        return self.cleaner.extract_contents(body)
