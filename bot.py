@@ -21,7 +21,6 @@ from lncrawl.core.sources import load_sources
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-# AGGRESSIVE SPEED: 80 threads should hit ~15-20 chapters/sec on a good VPS
 MAX_WORKERS = 80 
 DOWNLOAD_DIR = "downloads"
 PROCESSED_FILE = "processed.json"
@@ -35,45 +34,38 @@ logger = logging.getLogger(__name__)
 
 class NovelBot:
     def __init__(self):
-        # Executor for the heavy lifting (Scraping)
         self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="bot_worker")
         self.load_history()
 
     def load_history(self):
-        """Load processed and error lists from JSON files."""
         self.processed = set()
         self.errors = {}
-
         if os.path.exists(PROCESSED_FILE):
             try:
                 with open(PROCESSED_FILE, 'r') as f:
                     self.processed = set(json.load(f))
-            except Exception:
-                logger.error("Failed to load processed.json")
-
+            except Exception: pass
         if os.path.exists(ERRORS_FILE):
             try:
                 with open(ERRORS_FILE, 'r') as f:
                     self.errors = json.load(f)
-            except Exception:
-                logger.error("Failed to load errors.json")
+            except Exception: pass
 
     def save_success(self, url):
-        """Save a URL to the processed list."""
         self.processed.add(url)
-        # Remove from errors if it was there previously
         if url in self.errors:
             del self.errors[url]
-            self.save_errors() # Update error file immediately
-        
+            self.save_errors()
         with open(PROCESSED_FILE, 'w') as f:
             json.dump(list(self.processed), f, indent=2)
 
-    def save_error(self, url, error_msg):
-        """Save a URL and error message to the error list."""
-        self.errors[url] = str(error_msg)
+    def save_errors(self):
         with open(ERRORS_FILE, 'w') as f:
             json.dump(self.errors, f, indent=2)
+
+    def save_error(self, url, error_msg):
+        self.errors[url] = str(error_msg)
+        self.save_errors()
 
     def start(self):
         if not TOKEN:
@@ -84,19 +76,17 @@ class NovelBot:
         application.add_handler(CommandHandler("start", self.cmd_start))
         application.add_handler(MessageHandler(filters.Document.MimeType("application/json"), self.handle_json_file))
         
-        print("🚀 Loading sources and warming up...")
+        print("🚀 Loading sources...")
         load_sources()
-        print(f"✅ Bot online! Speed set to {MAX_WORKERS} threads.")
+        print(f"✅ Bot online! (Threads: {MAX_WORKERS})")
         
         application.run_polling()
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            f"⚡ **High Performance Bot Online** ⚡\n\n"
-            f"threads: `{MAX_WORKERS}`\n"
-            f"Processed novels: `{len(self.processed)}`\n"
-            f"Errored novels: `{len(self.errors)}`\n\n"
-            "Upload a **JSON file** to start batch downloading."
+            f"⚡ **High Performance Bot** ⚡\n"
+            f"History: {len(self.processed)} processed, {len(self.errors)} errors.\n"
+            "Send a JSON file to start."
         )
 
     async def handle_json_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -114,14 +104,10 @@ class NovelBot:
                 await update.message.reply_text("Error: JSON must contain a list of URLs.")
                 return
 
-            # Filter URLs
             to_process = [u for u in urls if u not in self.processed]
-            skipped_count = len(urls) - len(to_process)
-
-            msg = f"📥 **Batch Received**\nTotal: {len(urls)}\nSkipping: {skipped_count} (already done)\nQueueing: {len(to_process)}"
+            msg = f"📥 **Batch Received**\nTotal: {len(urls)}\nNew: {len(to_process)}"
             await update.message.reply_text(msg)
 
-            # Process sequentially to manage resources better, or use Semaphore for limited concurrency
             for url in to_process:
                 await self.process_novel(url, update, context)
 
@@ -129,20 +115,17 @@ class NovelBot:
 
         except Exception as e:
             logger.error(f"File Error: {e}")
-            await update.message.reply_text("❌ Critical error processing file.")
+            await update.message.reply_text("❌ File error.")
         finally:
             if os.path.exists(file_path):
                 os.remove(file_path)
 
     async def process_novel(self, url: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_msg = await update.message.reply_text(f"⏳ **Starting:** {url}")
-        
         progress_queue = queue.Queue()
         loop = asyncio.get_running_loop()
-        
         start_time = time.time()
         
-        # Run blocking scrape in background thread
         future = loop.run_in_executor(self.executor, self._scrape_logic, url, progress_queue)
         
         last_text = ""
@@ -150,18 +133,14 @@ class NovelBot:
 
         while not future.done():
             try:
-                # Non-blocking queue get
                 text = progress_queue.get_nowait()
                 now = time.time()
-                
-                # Update Telegram message every 3 seconds max to avoid flood limits
                 if text != last_text and (now - last_update) > 3:
                     try:
                         await status_msg.edit_text(text)
                         last_text = text
                         last_update = now
-                    except Exception:
-                        pass
+                    except Exception: pass
             except queue.Empty:
                 await asyncio.sleep(0.5)
 
@@ -170,7 +149,7 @@ class NovelBot:
             duration = int(time.time() - start_time)
             
             if epub_path and os.path.exists(epub_path):
-                file_size = os.path.getsize(epub_path) / (1024 * 1024) # MB
+                file_size = os.path.getsize(epub_path) / (1024 * 1024)
                 await status_msg.edit_text(f"✅ **Success** ({duration}s)\nUploading {file_size:.1f}MB...")
                 
                 await update.message.reply_document(
@@ -178,17 +157,16 @@ class NovelBot:
                     caption=f"📕 {os.path.basename(epub_path)}\n⏱️ Time: {duration}s"
                 )
                 await status_msg.delete()
-                
-                self.save_success(url) # Save to history
+                self.save_success(url)
                 os.remove(epub_path)
             else:
-                raise Exception("File was not generated.")
+                raise Exception("File not generated.")
                 
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Fail: {url} -> {error_msg}")
             await status_msg.edit_text(f"❌ **Failed:** {url}\nReason: {error_msg}")
-            self.save_error(url, error_msg) # Save to error log
+            self.save_error(url, error_msg)
 
     def _scrape_logic(self, url: str, progress_queue):
         app = App()
@@ -198,33 +176,38 @@ class NovelBot:
             app.prepare_search()
             app.get_novel_info()
             
-            # --- SPEED HACK START ---
             if app.crawler:
-                # Override the crawler's executor with our high worker count
                 app.crawler.init_executor(MAX_WORKERS)
-            # --- SPEED HACK END ---
+
+            # --- FIX: DOWNLOAD COVER MANUALLY ---
+            if app.crawler.novel_cover:
+                try:
+                    progress_queue.put("🖼️ Downloading cover...")
+                    # Use the crawler's session (cloudscraper) to avoid 403 Forbidden
+                    response = app.crawler.get_response(app.crawler.novel_cover)
+                    cover_path = os.path.join(app.output_path, 'cover.jpg')
+                    with open(cover_path, 'wb') as f:
+                        f.write(response.content)
+                    app.book_cover = cover_path # Explicitly tell the binder to use this
+                except Exception as e:
+                    logger.warning(f"Failed to download cover: {e}")
+            # ------------------------------------
 
             app.chapters = app.crawler.chapters[:]
             app.pack_by_volume = False
             app.output_formats = {'epub': True}
             
             total_chapters = len(app.chapters)
-            progress_queue.put(f"⬇️ Downloading {total_chapters} chapters (Threads: {MAX_WORKERS})...")
+            progress_queue.put(f"⬇️ Downloading {total_chapters} chapters...")
 
-            # Download Loop
             for i, _ in enumerate(app.start_download()):
-                # Only update queue occasionally to reduce overhead
                 if i % 20 == 0 or i == total_chapters:
                     percent = int(app.progress)
-                    # Calculate Speed roughly
                     progress_queue.put(f"🚀 Downloading: {percent}% ({i}/{total_chapters})")
             
-            # --- FIX FOR INDEX ERROR ---
-            # Check if we actually got chapters
             successful_chapters = [c for c in app.chapters if c.body]
             if not successful_chapters:
-                raise Exception("No content was downloaded (0 successful chapters).")
-            # ---------------------------
+                raise Exception("No content downloaded.")
 
             progress_queue.put("📦 Compiling EPUB...")
             generated = [f for fmt, f in app.bind_books()]
@@ -233,7 +216,6 @@ class NovelBot:
                 final = os.path.join(DOWNLOAD_DIR, os.path.basename(generated[0]))
                 shutil.copy(generated[0], final)
                 return final
-            
             return None
         except Exception as e:
             raise e
