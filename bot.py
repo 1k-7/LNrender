@@ -20,10 +20,12 @@ from lncrawl.core.sources import load_sources
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-MAX_WORKERS = 80 
-DOWNLOAD_DIR = "downloads"
-PROCESSED_FILE = "processed.json"
-ERRORS_FILE = "errors.json"
+MAX_WORKERS = 80  # Keep this under 100 to avoid Cloudflare bans
+# Persistent storage paths
+DATA_DIR = "data"
+DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
+PROCESSED_FILE = os.path.join(DATA_DIR, "processed.json")
+ERRORS_FILE = os.path.join(DATA_DIR, "errors.json")
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -33,6 +35,8 @@ logger = logging.getLogger(__name__)
 class NovelBot:
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="bot_worker")
+        # Ensure data directory exists
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         self.load_history()
 
     def load_history(self):
@@ -94,13 +98,13 @@ class NovelBot:
         self.errors = {}
         if os.path.exists(PROCESSED_FILE): os.remove(PROCESSED_FILE)
         if os.path.exists(ERRORS_FILE): os.remove(ERRORS_FILE)
-        await update.message.reply_text("🗑️ **History Reset.** You can now re-download previously processed novels.")
+        await update.message.reply_text("🗑️ **History Reset.**")
 
     async def handle_json_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         document = update.message.document
         file = await document.get_file()
-        file_path = os.path.join(DOWNLOAD_DIR, f"{document.file_id}.json")
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        # Save input file to data dir temporarily
+        file_path = os.path.join(DATA_DIR, f"input_{document.file_id}.json")
         await file.download_to_drive(file_path)
 
         try:
@@ -187,20 +191,14 @@ class NovelBot:
                 app.crawler.init_executor(MAX_WORKERS)
 
             # --- COVER FIX ---
-            # Ensure we have a valid cover image path that exists locally
             if app.crawler.novel_cover:
                 try:
                     progress_queue.put("🖼️ Downloading cover...")
-                    # We use the crawler's internal scraper to bypass blocks
                     response = app.crawler.get_response(app.crawler.novel_cover)
-                    # Save to the EXACT output path with a specific filename
                     cover_path = os.path.abspath(os.path.join(app.output_path, 'cover.jpg'))
                     with open(cover_path, 'wb') as f:
                         f.write(response.content)
-                    
-                    # Set the app property to the absolute local path
                     app.book_cover = cover_path
-                    logger.info(f"Cover saved to: {cover_path}")
                 except Exception as e:
                     logger.warning(f"Failed to download cover: {e}")
                     app.book_cover = None
