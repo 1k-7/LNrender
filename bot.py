@@ -13,9 +13,11 @@ from telegram.ext import (
     filters,
 )
 
-# Import lncrawl core components
+# --- FIX START ---
+# We must import load_sources to register the crawlers
 from lncrawl.core.app import App
-from lncrawl.core.sources import prepare_crawler
+from lncrawl.core.sources import prepare_crawler, load_sources
+# --- FIX END ---
 
 # Configuration
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -90,20 +92,28 @@ class NovelBot:
             else:
                 await status_msg.edit_text(f"❌ Failed: {url}")
         except Exception as e:
+            # Improve error logging to see what's wrong
+            logger.error(f"Failed processing {url}: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ Error: {str(e)}")
 
     def _scrape_logic(self, url: str):
+        # App() does NOT auto-load sources. We rely on the global load_sources() called in main.
         app = App()
         try:
             app.user_input = url
             app.prepare_search()
             app.get_novel_info()
+            
+            # Speed Hack: Force concurrency on the specific crawler instance
             if app.crawler:
                 app.crawler.init_executor(MAX_WORKERS)
+                
             app.chapters = app.crawler.chapters[:]
             app.pack_by_volume = False
             app.output_formats = {'epub': True}
+            
             for _ in app.start_download(): pass
+            
             generated = [f for fmt, f in app.bind_books()]
             if generated:
                 final = os.path.join(DOWNLOAD_DIR, os.path.basename(generated[0]))
@@ -116,5 +126,11 @@ class NovelBot:
             app.destroy()
 
 if __name__ == "__main__":
+    # --- FIX: LOAD CRAWLERS HERE ---
+    print("Loading sources...")
+    load_sources()
+    print("Sources loaded.")
+    # -------------------------------
+    
     bot = NovelBot()
     bot.start()

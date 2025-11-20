@@ -2,7 +2,6 @@
 FROM python:3.10-slim
 
 # 1. Install system build dependencies (caches this layer)
-# We add libxml2, libxslt, and libjpeg to ensure wheels work or compile fast if needed
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
@@ -18,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 # Set work directory
 WORKDIR /app
 
-# 2. Upgrade pip to ensure we get binary wheels (Fixes timeout/long build)
+# 2. Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # 3. Install Python dependencies
@@ -28,11 +27,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 4. Copy project files
 COPY . .
 
+# 5. IMPORTANT: Prevent auto-downloading unused sources
+ENV LNCRAWL_MODE="dev" 
+ENV PYTHONUNBUFFERED=1
+
 # Create downloads directory
 RUN mkdir -p downloads
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
 
 # Command to run the bot
 CMD ["python", "bot.py"]
