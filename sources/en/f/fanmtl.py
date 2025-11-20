@@ -16,7 +16,9 @@ class FanMTLCrawler(ChapterOnlyBrowserTemplate):
     base_url = "https://www.fanmtl.com/"
 
     def initialize(self):
-        self.init_executor(1)
+        # Force high concurrency here as well for safety, 
+        # though bot.py overrides it usually.
+        self.init_executor(10) 
         self.cleaner.bad_css.update(
             {
                 'div[align="center"]',
@@ -39,15 +41,38 @@ class FanMTLCrawler(ChapterOnlyBrowserTemplate):
             yield possible_author.text.strip()
 
     def select_chapter_tags(self, soup: BeautifulSoup) -> Generator[Tag, None, None]:
-        last_page = soup.select('.pagination a[data-ajax-update="#chpagedlist"]')[-1]
+        # FIX: Check if pagination exists
+        pagination = soup.select('.pagination a[data-ajax-update="#chpagedlist"]')
+        
+        if not pagination:
+            # Case 1: No pagination (Single page novel)
+            yield from soup.select("ul.chapter-list li a")
+            return
+
+        # Case 2: Pagination exists (Multi-page novel)
+        last_page = pagination[-1]
         last_page_url = self.absolute_url(last_page["href"])
+        
+        # Extract base URL and params
         common_page_url = last_page_url.split("?")[0]
         params = parse_qs(urlparse(last_page_url).query)
-        page_count = int(params["page"][0]) + 1
+        
+        # Calculate total pages safely
+        try:
+            page_count = int(params.get("page", [0])[0]) + 1
+            wjm_param = params.get("wjm", [""])[0]
+        except (IndexError, ValueError):
+             # Fallback if URL parsing fails
+            yield from soup.select("ul.chapter-list li a")
+            return
+
+        # Queue up all pages
         futures = []
         for page in range(page_count):
-            page_url = f"{common_page_url}?page={page}&wjm={params['wjm'][0]}"
+            page_url = f"{common_page_url}?page={page}&wjm={wjm_param}"
             futures.append(self.executor.submit(self.get_soup, page_url))
+            
+        # Resolve and yield
         for soup in self.resolve_futures(futures, desc="TOC", unit="page"):
             yield from soup.select("ul.chapter-list li a")
 
