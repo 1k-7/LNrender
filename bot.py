@@ -20,8 +20,7 @@ from lncrawl.core.sources import load_sources
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-MAX_WORKERS = 80  # Keep this under 100 to avoid Cloudflare bans
-# Persistent storage paths
+MAX_WORKERS = 80 
 DATA_DIR = "data"
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
 PROCESSED_FILE = os.path.join(DATA_DIR, "processed.json")
@@ -35,7 +34,6 @@ logger = logging.getLogger(__name__)
 class NovelBot:
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="bot_worker")
-        # Ensure data directory exists
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         self.load_history()
 
@@ -71,7 +69,7 @@ class NovelBot:
 
     def start(self):
         if not TOKEN:
-            print("Error: TELEGRAM_TOKEN environment variable not set.")
+            print("Error: TELEGRAM_TOKEN not set.")
             return
 
         application = Application.builder().token(TOKEN).build()
@@ -88,7 +86,7 @@ class NovelBot:
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⚡ **FanMTL Bot** ⚡\n"
-            f"Processed: `{len(self.processed)}` | Errors: `{len(self.errors)}`\n"
+            f"Processed: `{len(self.processed)}`\n"
             "Send a JSON file to start.\n"
             "Send /reset to clear history."
         )
@@ -98,12 +96,11 @@ class NovelBot:
         self.errors = {}
         if os.path.exists(PROCESSED_FILE): os.remove(PROCESSED_FILE)
         if os.path.exists(ERRORS_FILE): os.remove(ERRORS_FILE)
-        await update.message.reply_text("🗑️ **History Reset.**")
+        await update.message.reply_text("🗑️ **History Reset.** You can now re-download novels.")
 
     async def handle_json_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         document = update.message.document
         file = await document.get_file()
-        # Save input file to data dir temporarily
         file_path = os.path.join(DATA_DIR, f"input_{document.file_id}.json")
         await file.download_to_drive(file_path)
 
@@ -190,19 +187,28 @@ class NovelBot:
             if app.crawler:
                 app.crawler.init_executor(MAX_WORKERS)
 
-            # --- COVER FIX ---
+            # --- COVER FIX WITH HEADERS ---
             if app.crawler.novel_cover:
                 try:
                     progress_queue.put("🖼️ Downloading cover...")
-                    response = app.crawler.get_response(app.crawler.novel_cover)
-                    cover_path = os.path.abspath(os.path.join(app.output_path, 'cover.jpg'))
-                    with open(cover_path, 'wb') as f:
-                        f.write(response.content)
-                    app.book_cover = cover_path
+                    # Add Referer to satisfy Cloudflare/Hotlink protection
+                    headers = {"Referer": "https://www.fanmtl.com/"}
+                    
+                    # Use requests via the crawler session
+                    response = app.crawler.scraper.get(app.crawler.novel_cover, headers=headers)
+                    
+                    if response.status_code == 200:
+                        cover_path = os.path.abspath(os.path.join(app.output_path, 'cover.jpg'))
+                        with open(cover_path, 'wb') as f:
+                            f.write(response.content)
+                        app.book_cover = cover_path
+                        logger.info(f"Cover saved: {cover_path}")
+                    else:
+                         logger.warning(f"Cover download failed: {response.status_code}")
                 except Exception as e:
                     logger.warning(f"Failed to download cover: {e}")
                     app.book_cover = None
-            # ------------------
+            # ------------------------------
 
             app.chapters = app.crawler.chapters[:]
             app.pack_by_volume = False

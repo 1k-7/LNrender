@@ -18,40 +18,47 @@ class FanMTLCrawler(ChapterOnlyBrowserTemplate):
 
     def parse_title(self, soup: BeautifulSoup) -> str:
         possible_title = soup.select_one(".novel-info .novel-title, h1.novel-title")
-        assert possible_title, "No novel title"
-        return possible_title.text.strip()
+        return possible_title.text.strip() if possible_title else "Unknown Novel"
 
     def parse_cover(self, soup: BeautifulSoup) -> str:
-        # Try multiple selectors for the cover image
-        possible_image = (
-            soup.select_one(".novel-header figure.cover img") or
-            soup.select_one(".novel-left .novel-cover img") or
-            soup.select_one("img[itemprop='image']")
-        )
+        # Based on Source 18: <figure class="cover"><img src="..."></figure>
+        possible_image = soup.select_one("figure.cover img")
+        
+        # Fallbacks
+        if not possible_image:
+            possible_image = soup.select_one(".novel-cover img")
+            
         if possible_image:
-            return self.absolute_url(possible_image.get("src") or possible_image.get("data-src"))
+            url = possible_image.get("src") or possible_image.get("data-src")
+            return self.absolute_url(url)
 
     def parse_authors(self, soup: BeautifulSoup) -> Generator[str, None, None]:
-        possible_author = soup.select_one('.novel-info .author span[itemprop="author"]')
+        # Based on Source 18: <div class="author">...<span itemprop="author">Name</span></div>
+        possible_author = soup.select_one('span[itemprop="author"]')
+        
         if possible_author:
             text = possible_author.text.strip()
-            # Prevent the URL from being listed as the author
-            if "fanmtl" in text.lower() or "http" in text:
-                yield "Unknown"
-            else:
+            # Filter out URLs if they accidentally leak in
+            if "http" not in text and "www." not in text:
                 yield text
-        else:
-            yield "Unknown"
+                return
+
+        yield "Unknown"
 
     def parse_synopsis(self, soup: BeautifulSoup) -> str:
-        # Grab the summary/description
-        possible_synopsis = soup.select_one(".novel-info .description, .description, .summary")
+        # Based on Source 22: <div class="summary">...<div class="content">TEXT</div></div>
+        # We target .content inside .summary to avoid getting the "Summary" header text
+        possible_synopsis = soup.select_one(".summary .content")
+        
         if possible_synopsis:
-            return possible_synopsis.text.strip()
+            # Clean up the "Description" label if it exists in the text
+            text = possible_synopsis.text.strip()
+            return text.replace("Summary", "").strip()
+            
         return "Summary not available."
 
     def select_chapter_tags(self, soup: BeautifulSoup) -> Generator[Tag, None, None]:
-        # Check for pagination to avoid IndexErrors on single-page novels
+        # Robust pagination check
         pagination = soup.select('.pagination a[data-ajax-update="#chpagedlist"]')
         
         if not pagination:
@@ -60,7 +67,6 @@ class FanMTLCrawler(ChapterOnlyBrowserTemplate):
 
         last_page = pagination[-1]
         last_page_url = self.absolute_url(last_page["href"])
-        
         common_page_url = last_page_url.split("?")[0]
         params = parse_qs(urlparse(last_page_url).query)
         
