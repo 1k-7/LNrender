@@ -1,14 +1,13 @@
 import os
 from typing import Optional
 
-from sqlmodel import desc, func, select
-
 from ..context import ServerContext
 from ..exceptions import AppErrors
 from ..models.enums import UserRole
 from ..models.novel import Artifact
 from ..models.pagination import Paginated
 from ..models.user import User
+from ..utils.time_utils import current_timestamp
 
 
 class ArtifactService:
@@ -22,66 +21,62 @@ class ArtifactService:
         limit: int = 20,
         novel_id: Optional[str] = None,
     ) -> Paginated[Artifact]:
-        with self._db.session() as sess:
-            stmt = select(Artifact)
+        query = {}
+        if novel_id:
+            query["novel_id"] = novel_id
+            
+        total = self._db.artifacts.count_documents(query)
+        cursor = self._db.artifacts.find(query).sort("updated_at", -1).skip(offset).limit(limit)
+        items = [Artifact(**doc) for doc in cursor]
 
-            # Apply filters
-            if not novel_id:
-                stmt = stmt.where(Artifact.novel_id == novel_id)
-
-            # Apply sorting
-            stmt = stmt.order_by(desc(Artifact.updated_at))
-
-            total = sess.exec(select(func.count()).select_from(Artifact)).one()
-            items = sess.exec(stmt.offset(offset).limit(limit)).all()
-
-            return Paginated(
-                total=total,
-                offset=offset,
-                limit=limit,
-                items=list(items),
-            )
+        return Paginated(
+            total=total,
+            offset=offset,
+            limit=limit,
+            items=items,
+        )
 
     def get(self, artifact_id: str) -> Artifact:
-        with self._db.session() as sess:
-            artifact = sess.get(Artifact, artifact_id)
-            if not artifact:
-                raise AppErrors.no_such_artifact
-            return artifact
+        data = self._db.artifacts.find_one({"_id": artifact_id})
+        if not data:
+            raise AppErrors.no_such_artifact
+        return Artifact(**data)
 
     def delete(self, artifact_id: str, user: User) -> bool:
         if user.role != UserRole.ADMIN:
             raise AppErrors.forbidden
-        with self._db.session() as sess:
-            artifact = sess.get(Artifact, artifact_id)
-            if not artifact:
-                raise AppErrors.no_such_artifact
-            sess.delete(artifact)
-            sess.commit()
-            return True
+        
+        data = self._db.artifacts.find_one({"_id": artifact_id})
+        if not data:
+            raise AppErrors.no_such_artifact
+            
+        self._db.artifacts.delete_one({"_id": artifact_id})
+        return True
 
     def upsert(self, item: Artifact):
         old_file = None
         new_file = item.output_file
 
-        with self._db.session() as sess:
-            artifact = sess.exec(
-                select(Artifact)
-                .where(Artifact.novel_id == item.novel_id)
-                .where(Artifact.format == item.format)
-            ).first()
+        query = {
+            "novel_id": item.novel_id,
+            "format": item.format
+        }
+        existing = self._db.artifacts.find_one(query)
 
-            if not artifact:
-                sess.add(item)
-            else:
-                # update values
-                old_file = artifact.output_file
-                artifact.job_id = item.job_id
-                artifact.output_file = item.output_file
-                sess.add(artifact)
-
-            sess.commit()
+        if not existing:
+            self._db.artifacts.insert_one(item.model_dump(by_alias=True))
+        else:
+            old_file = existing.get("output_file")
+            update_data = {
+                "job_id": item.job_id,
+                "output_file": item.output_file,
+                "updated_at": current_timestamp()
+            }
+            self._db.artifacts.update_one({"_id": existing["_id"]}, {"$set": update_data})
 
         # remove old file
         if old_file and old_file != new_file and os.path.isfile(old_file):
-            os.remove(old_file)
+            try:
+                os.remove(old_file)
+            except OSError:
+                pass

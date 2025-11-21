@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: lncrawl-server
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn lncrawl.bots.server.app:app -w 4 -k uvicorn.workers.UvicornWorker
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: MONGODB_URL
+        fromConnectionString: mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+      - key: SERVER_SECRET
+        generateValue: true

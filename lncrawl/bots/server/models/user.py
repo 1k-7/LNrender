@@ -1,28 +1,27 @@
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, EmailStr
-from sqlmodel import JSON, BigInteger, Column, Field, SQLModel
+from pydantic import BaseModel, EmailStr, Field
 
 from ..utils.time_utils import current_timestamp
 from ._base import BaseTable
 from .enums import UserRole, UserTier
 
 
-class User(BaseTable, table=True):
+class User(BaseTable):
     password: str = Field(description="Hashed password", exclude=True)
-    email: str = Field(unique=True, index=True, description="User Email")
+    email: str = Field(description="User Email")
     name: Optional[str] = Field(default=None, description="Full name")
 
     role: UserRole = Field(default=UserRole.USER, description="User role")
     tier: UserTier = Field(default=UserTier.BASIC, description="User tier")
     is_active: bool = Field(default=True, description="Active status")
 
-    extra: Dict[str, Any] = Field(default={}, sa_column=Column(JSON), description="Extra field")
+    extra: Dict[str, Any] = Field(default={}, description="Extra field")
 
 
-class VerifiedEmail(SQLModel, table=True):
-    email: str = Field(primary_key=True, description="User Email")
-    created_at: int = Field(sa_type=BigInteger, default_factory=current_timestamp)
+class VerifiedEmail(BaseModel):
+    email: str = Field(description="User Email")
+    created_at: int = Field(default_factory=current_timestamp)
 
 
 class LoginRequest(BaseModel):

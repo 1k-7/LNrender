@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 
 from jose import jwt
 from passlib.context import CryptContext
-from sqlmodel import and_, asc, func, or_, select
 
 from ..context import ServerContext
 from ..exceptions import AppErrors
@@ -13,6 +12,7 @@ from ..models.pagination import Paginated
 from ..models.user import (CreateRequest, LoginRequest, PasswordUpdateRequest,
                            UpdateRequest, User, UserRole, UserTier,
                            VerifiedEmail)
+from ..utils.time_utils import current_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -33,28 +33,33 @@ class UserService:
         return self._passlib.verify(plain, hashed)
 
     def prepare(self):
-        with self._db.session() as sess:
-            email = self._ctx.config.server.admin_email
-            password = self._ctx.config.server.admin_password
-            q = select(User).where(User.email == email)
-            user = sess.exec(q).first()
-            if not user:
-                logger.info('Adding admin user')
-                user = User(
-                    email=email,
-                    password=self._hash(password),
-                    name="Server Admin",
-                    role=UserRole.ADMIN,
-                    tier=UserTier.VIP,
-                )
-            else:
-                logger.info('Updating admin user')
-                user.is_active = True
-                user.role = UserRole.ADMIN
-                user.tier = UserTier.VIP
-                user.password = self._hash(password)
-            sess.add(user)
-            sess.commit()
+        email = self._ctx.config.server.admin_email
+        password = self._ctx.config.server.admin_password
+        
+        user_data = self._db.users.find_one({"email": email})
+        
+        if not user_data:
+            logger.info('Adding admin user')
+            user = User(
+                email=email,
+                password=self._hash(password),
+                name="Server Admin",
+                role=UserRole.ADMIN,
+                tier=UserTier.VIP,
+            )
+            self._db.users.insert_one(user.model_dump(by_alias=True))
+        else:
+            logger.info('Updating admin user')
+            self._db.users.update_one(
+                {"_id": user_data["_id"]},
+                {"$set": {
+                    "is_active": True,
+                    "role": UserRole.ADMIN,
+                    "tier": UserTier.VIP,
+                    "password": self._hash(password),
+                    "updated_at": current_timestamp()
+                }}
+            )
 
     def encode_token(
         self,
@@ -103,107 +108,81 @@ class UserService:
         limit: int = 20,
         search: Optional[str] = None
     ) -> Paginated[User]:
-        with self._db.session() as sess:
-            stmt = select(User)
-            cnt = select(func.count()).select_from(User)
+        query = {}
+        if search:
+            query = {
+                "$or": [
+                    {"name": {"$regex": search, "$options": "i"}},
+                    {"email": {"$regex": search, "$options": "i"}},
+                    {"role": {"$regex": search, "$options": "i"}},
+                    {"tier": {"$regex": search, "$options": "i"}},
+                ]
+            }
 
-            # Apply filters
-            conditions: List[Any] = []
-            if search:
-                q = f'%{search.lower()}%'
-                conditions.append(
-                    or_(
-                        func.lower(User.name).like(q),
-                        func.lower(User.email).like(q),
-                        func.lower(User.role).like(q),
-                        func.lower(User.tier).like(q),
-                    )
-                )
+        total = self._db.users.count_documents(query)
+        cursor = self._db.users.find(query).sort("created_at", 1).skip(offset).limit(limit)
+        items = [User(**doc) for doc in cursor]
 
-            if conditions:
-                cnd = and_(*conditions)
-                stmt = stmt.where(cnd)
-                cnt = cnt.where(cnd)
-
-            # Apply sorting
-            stmt = stmt.order_by(asc(User.created_at))
-
-            # Apply pagination
-            stmt = stmt.offset(offset).limit(limit)
-
-            total = sess.exec(cnt).one()
-            items = sess.exec(stmt).all()
-
-            return Paginated(
-                total=total,
-                offset=offset,
-                limit=limit,
-                items=list(items),
-            )
+        return Paginated(
+            total=total,
+            offset=offset,
+            limit=limit,
+            items=items,
+        )
 
     def get(self, user_id: str) -> User:
-        with self._db.session() as sess:
-            user = sess.get(User, user_id)
-            if not user:
-                raise AppErrors.no_such_user
-            return user
+        data = self._db.users.find_one({"_id": user_id})
+        if not data:
+            raise AppErrors.no_such_user
+        return User(**data)
 
     def verify(self, creds: LoginRequest) -> User:
-        with self._db.session() as sess:
-            q = select(User).where(User.email == creds.email)
-            user = sess.exec(q).first()
-            if not user:
-                raise AppErrors.no_such_user
-            if not user.is_active:
-                raise AppErrors.inactive_user
+        data = self._db.users.find_one({"email": creds.email})
+        if not data:
+            raise AppErrors.no_such_user
+        user = User(**data)
+        if not user.is_active:
+            raise AppErrors.inactive_user
         if not self._check(creds.password, user.password):
             raise AppErrors.unauthorized
         return user
 
     def create(self, body: CreateRequest) -> User:
-        with self._db.session() as sess:
-            q = select(func.count()).where(User.email == body.email)
-            if sess.exec(q).one() != 0:
-                raise AppErrors.user_exists
-            user = User(
-                name=body.name,
-                email=body.email,
-                role=body.role,
-                tier=body.tier,
-                password=self._hash(body.password),
-            )
-            sess.add(user)
-            sess.commit()
-            sess.refresh(user)
-            return user
+        if self._db.users.count_documents({"email": body.email}) > 0:
+            raise AppErrors.user_exists
+        
+        user = User(
+            name=body.name,
+            email=body.email,
+            role=body.role,
+            tier=body.tier,
+            password=self._hash(body.password),
+        )
+        self._db.users.insert_one(user.model_dump(by_alias=True))
+        return user
 
     def update(self, user_id: str, body: UpdateRequest) -> bool:
-        with self._db.session() as sess:
-            user = sess.get(User, user_id)
-            if not user:
-                raise AppErrors.no_such_user
+        user_data = self._db.users.find_one({"_id": user_id})
+        if not user_data:
+            raise AppErrors.no_such_user
 
-            updated = False
-            if body.name is not None:
-                user.name = body.name
-                updated = True
-            if body.password is not None:
-                user.password = self._hash(body.password)
-                updated = True
-            if body.role is not None:
-                user.role = body.role
-                updated = True
-            if body.tier is not None:
-                user.tier = body.tier
-                updated = True
-            if body.is_active is not None:
-                user.is_active = body.is_active
-                updated = True
+        update_data = {}
+        if body.name is not None:
+            update_data["name"] = body.name
+        if body.password is not None:
+            update_data["password"] = self._hash(body.password)
+        if body.role is not None:
+            update_data["role"] = body.role
+        if body.tier is not None:
+            update_data["tier"] = body.tier
+        if body.is_active is not None:
+            update_data["is_active"] = body.is_active
 
-            if updated:
-                sess.add(user)
-                sess.commit()
-            return updated
+        if update_data:
+            update_data["updated_at"] = current_timestamp()
+            self._db.users.update_one({"_id": user_id}, {"$set": update_data})
+            return True
+        return False
 
     def change_password(self, user: User, body: PasswordUpdateRequest) -> bool:
         if not self._check(body.old_password, user.password):
@@ -212,34 +191,25 @@ class UserService:
         return self.update(user.id, request)
 
     def remove(self, user_id: str) -> bool:
-        with self._db.session() as sess:
-            user = sess.get(User, user_id)
-            if not user:
-                raise AppErrors.no_such_user
-            sess.delete(user)
-            sess.commit()
-            return True
+        result = self._db.users.delete_one({"_id": user_id})
+        if result.deleted_count == 0:
+            raise AppErrors.no_such_user
+        return True
 
     def is_verified(self, email: str) -> bool:
-        with self._db.session() as sess:
-            verified = sess.get(VerifiedEmail, email)
-            return bool(verified)
+        return self._db.verified_emails.find_one({"email": email}) is not None
 
     def set_verified(self, email: str) -> bool:
-        with self._db.session() as sess:
-            verified = sess.get(VerifiedEmail, email)
-            if verified:
-                return True
-            entry = VerifiedEmail(email=email)
-            sess.add(entry)
-            sess.commit()
+        if self.is_verified(email):
             return True
+        
+        entry = VerifiedEmail(email=email)
+        self._db.verified_emails.insert_one(entry.model_dump())
+        return True
 
     def send_otp(self, email: str):
-        with self._db.session() as sess:
-            verified = sess.get(VerifiedEmail, email)
-            if verified:
-                raise AppErrors.email_already_verified
+        if self.is_verified(email):
+            raise AppErrors.email_already_verified
 
         otp = str(secrets.randbelow(1000000)).zfill(6)
         self._ctx.mail.send_otp(email, otp)
@@ -258,22 +228,19 @@ class UserService:
         if actual_otp != input_otp:
             raise AppErrors.unauthorized
 
-        with self._db.session() as sess:
-            entry = VerifiedEmail(email=email)
-            sess.add(entry)
-            sess.commit()
-            return True
+        self.set_verified(email)
+        return True
 
     def send_password_reset_link(self, email: str) -> bool:
-        with self._db.session() as sess:
-            q = select(User).where(User.email == email)
-            user = sess.exec(q).first()
-            if not user:
-                raise AppErrors.no_such_user
-            if not user.is_active:
-                raise AppErrors.inactive_user
-            token = self.generate_token(user, 5)
-
+        data = self._db.users.find_one({"email": email})
+        if not data:
+            raise AppErrors.no_such_user
+        
+        user = User(**data)
+        if not user.is_active:
+            raise AppErrors.inactive_user
+            
+        token = self.generate_token(user, 5)
         base_url = self._ctx.config.server.base_url
         link = f'{base_url}/reset-password?token={token}&email={user.email}'
 

@@ -51,12 +51,16 @@ class ServerConfig:
         return env('SERVER_ADMIN_PASSWORD')
 
     @cached_property
-    def database_url(self) -> str:
-        return env('DATABASE_URL', 'sqlite:///sqlite.db')
+    def mongodb_url(self) -> str:
+        return env('MONGODB_URL')
+
+    @cached_property
+    def database_name(self) -> str:
+        return env('MONGODB_DB_NAME', 'lncrawl')
 
     @cached_property
     def base_url(self) -> str:
-        return env('SERVER_BASE_URL').strip('/')
+        return env('SERVER_BASE_URL', '/').strip('/')
 
 
 class App:
