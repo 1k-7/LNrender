@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
 from urllib.parse import urlparse
@@ -31,104 +32,71 @@ class TelegramBot:
         self.executor = ThreadPoolExecutor(
             max_workers=10, thread_name_prefix="telegram_bot"
         )
-        self.active_sessions: Dict[str, dict] = {}  # Track active user sessions
-        self.max_active_sessions = 50  # Maximum concurrent sessions
+        self.active_sessions: Dict[str, dict] = {}
+        self.max_active_sessions = 50
+        self.application = None
 
-    def start(self):
+    def prepare(self):
         os.environ["debug_mode"] = "yes"
-
-        # Build the Application and with bot's token.
         TOKEN = os.getenv("TELEGRAM_TOKEN", "")
         if not TOKEN:
-            raise Exception("Telegram token not found")
+            logger.warning("TELEGRAM_TOKEN not set. Bot will not start.")
+            return
 
         self.application = Application.builder().token(TOKEN).build()
         self.application.add_handler(CommandHandler("help", self.show_help))
         self.application.add_handler(CommandHandler("status", self.handle_downloader))
+        
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler("start", self.init_app),
-                MessageHandler(
-                    filters.TEXT & ~(filters.COMMAND), self.handle_novel_url
-                ),
+                MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_novel_url),
             ],
             fallbacks=[CommandHandler("cancel", self.destroy_app)],
             states={
-                "handle_novel_url": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_novel_url
-                    ),
-                ],
+                "handle_novel_url": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_novel_url)],
                 "handle_crawler_to_search": [
                     CommandHandler("skip", self.handle_crawler_to_search),
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_crawler_to_search
-                    ),
+                    MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_crawler_to_search),
                 ],
-                "handle_select_novel": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_select_novel
-                    ),
-                ],
-                "handle_select_source": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_select_source
-                    ),
-                ],
-                "handle_delete_cache": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_delete_cache
-                    ),
-                ],
+                "handle_select_novel": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_select_novel)],
+                "handle_select_source": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_select_source)],
+                "handle_delete_cache": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_delete_cache)],
                 "handle_range_selection": [
                     CommandHandler("all", self.handle_range_all),
                     CommandHandler("last", self.handle_range_last),
                     CommandHandler("first", self.handle_range_first),
                     CommandHandler("volume", self.handle_range_volume),
                     CommandHandler("chapter", self.handle_range_chapter),
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND),
-                        self.display_range_selection_help,
-                    ),
+                    MessageHandler(filters.TEXT & ~(filters.COMMAND), self.display_range_selection_help),
                 ],
-                "handle_volume_selection": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_volume_selection
-                    ),
-                ],
-                "handle_chapter_selection": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_chapter_selection
-                    ),
-                ],
-                "handle_pack_by_volume": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_pack_by_volume
-                    ),
-                ],
-                "handle_output_format": [
-                    MessageHandler(
-                        filters.TEXT & ~(filters.COMMAND), self.handle_output_format
-                    ),
-                ],
+                "handle_volume_selection": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_volume_selection)],
+                "handle_chapter_selection": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_chapter_selection)],
+                "handle_pack_by_volume": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_pack_by_volume)],
+                "handle_output_format": [MessageHandler(filters.TEXT & ~(filters.COMMAND), self.handle_output_format)],
             },
         )
         self.application.add_handler(conv_handler)
-
-        # Fallback helper
-        self.application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_downloader)
-        )
-
-        # Log all errors
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_downloader))
         self.application.add_error_handler(self.error_handler)
-        print("Telegram bot is online!")
 
-        # Run the bot until you press Ctrl-C or the process receives SIGINT,
-        # SIGTERM or SIGABRT. This should be used most of the time, since
-        # start_polling() is non-blocking and will stop the bot gracefully.
-        # Start the Bot
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+    def start(self):
+        if not self.application:
+            self.prepare()
+        
+        if self.application:
+            logger.info("Starting Telegram Bot...")
+            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        else:
+            logger.error("Telegram Bot Application not initialized.")
+
+    def start_in_background(self):
+        if not os.getenv("TELEGRAM_TOKEN"):
+            return
+            
+        t = threading.Thread(target=self.start, daemon=True)
+        t.start()
+        logger.info("Telegram bot thread started")
 
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Error: %s\nCaused by: %s", context.error, update)
@@ -177,22 +145,21 @@ class TelegramBot:
                     self.active_sessions.pop(chat_id, None)
                     logger.info("Session destroyed for chat_id: %s", chat_id)
 
-        await context.bot.send_message(
-            chat_id, text="Session closed", reply_markup=ReplyKeyboardRemove()
-        )
+        if update:
+            await context.bot.send_message(
+                chat_id, text="Session closed", reply_markup=ReplyKeyboardRemove()
+            )
         return ConversationHandler.END
 
     async def init_app(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(update.effective_message.chat_id)
 
-        # Check if user already has an active session
         if chat_id in self.active_sessions:
             await update.message.reply_text(
                 "You already have an active session. Please send /cancel to close it before starting a new one."
             )
             return ConversationHandler.END
 
-        # Check session limit
         if len(self.active_sessions) >= self.max_active_sessions:
             await update.message.reply_text(
                 "Sorry, the bot is currently handling too many requests. Please try again later."
@@ -200,10 +167,11 @@ class TelegramBot:
             return ConversationHandler.END
 
         app = App()
-        root = os.path.abspath(".telegram_bot_output")
-        good_name = os.path.basename(app.output_path)
-        output_path = os.path.join(root, chat_id, good_name)
-        app.output_path = output_path
+        root = os.path.abspath("downloads/telegram") # Saved to local temp folder
+        os.makedirs(root, exist_ok=True)
+        
+        # Ensure output path is valid
+        app.output_path = os.path.join(root, chat_id, "temp")
 
         self.active_sessions[chat_id] = {
             "app": app,
@@ -818,7 +786,6 @@ class TelegramBot:
                 await update.message.reply_text(
                     f"{status}\n"
                     f"{int(app.progress)}% out of {len(app.chapters)} chapters has been downloaded.\n"
-                    # "To terminate this session send /cancel."
                 )
             else:
                 await update.message.reply_text(

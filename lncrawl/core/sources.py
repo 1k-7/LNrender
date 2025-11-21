@@ -92,10 +92,12 @@ __local_data_path = Path(__file__).parent.parent.absolute()
 if not (__local_data_path / "sources").is_dir():
     __local_data_path = __local_data_path.parent
 
-__is_dev_mode = (
-    os.getenv("LNCRAWL_MODE") == "dev"
-    or (__local_data_path / ".git" / "HEAD").exists()
-)
+# FORCE DEV MODE to prevent downloading sources
+__is_dev_mode = True 
+# __is_dev_mode = (
+#     os.getenv("LNCRAWL_MODE") == "dev"
+#     or (__local_data_path / ".git" / "HEAD").exists()
+# )
 
 __current_index = {}
 __latest_index = {}
@@ -255,8 +257,9 @@ def __update_rejected(url: str, reason: str):
 
 
 def __load_rejected_sources():
-    for url, reason in __current_index["rejected"].items():
-        __update_rejected(url, reason)
+    if "rejected" in __current_index:
+        for url, reason in __current_index["rejected"].items():
+            __update_rejected(url, reason)
 
 
 def __import_crawlers(file_path: Path, no_cache=False) -> List[Type[Crawler]]:
@@ -363,10 +366,11 @@ def __add_crawlers_from_path(path: Path, no_cache=False):
 
 
 def __load_crawlers():
-    for _, current in __current_index["crawlers"].items():
-        source_file = __user_data_path / str(current["file_path"])
-        if source_file.is_file():
-            __add_crawlers_from_path(source_file)
+    if "crawlers" in __current_index:
+        for _, current in __current_index["crawlers"].items():
+            source_file = __user_data_path / str(current["file_path"])
+            if source_file.is_file():
+                __add_crawlers_from_path(source_file)
 
 
 # --------------------------------------------------------------------------- #

@@ -19,6 +19,9 @@ class ServerContext:
         self.mail.prepare()
         self.users.prepare()
         self.scheduler.start()
+        
+        # Start Telegram Bot
+        self.telegram.start_in_background()
 
     def cleanup(self):
         self.db.close()
@@ -76,3 +79,8 @@ class ServerContext:
     def mail(self):
         from .services.mail import MailService
         return MailService(self)
+        
+    @cached_property
+    def telegram(self):
+        from ..telegram import TelegramBot
+        return TelegramBot()
